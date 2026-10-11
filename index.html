@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
 <title>monke</title>
+<link rel="icon" type="image/png" href="icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bagel+Fat+One&family=Caveat:wght@500;700&family=Libre+Caslon+Text:ital,wght@0,400;0,700;1,400&display=swap">
@@ -303,6 +304,7 @@ footer a{color:#f6dd92}
           <button class="btn" type="button" id="clear">Wipe board</button>
           <button class="btn spacer" type="button" id="savePic" hidden>Save picture</button>
         </div>
+        <p class="note" id="boardStatus" aria-live="polite">Board changes are saved on this device.</p>
       </div>
       <div id="mailPane" aria-live="polite"><p class="note">Checking the mail…</p></div>
     </div>
@@ -317,6 +319,7 @@ footer a{color:#f6dd92}
   <div id="veilBody"></div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function(){
 'use strict';
@@ -326,6 +329,9 @@ function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cl
 var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
 var sleep=function(ms){return new Promise(function(r){setTimeout(r,reduce?0:ms)})};
 var store={get:function(k){try{return localStorage.getItem(k)}catch(e){return null}},set:function(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+var SUPABASE_URL='https://jitaibkfhzzkjampyesp.supabase.co';
+var SUPABASE_KEY='sb_publishable_Col4_VqPH7C-UbjTFQGOHQ_SFAiHwmN';
+var db=null,downloads=null,isOwner=false,uid=null,currentUser=null;
 
 /* textures made in the browser: plaster grain and walnut grain */
 var svgUrl=function(s){return 'url("data:image/svg+xml,'+encodeURIComponent(s)+'")'};
@@ -362,8 +368,10 @@ $$('.art').forEach(function(b){
 
 /* chalkboard */
 var cv=$('#chalk'),cx=cv.getContext('2d');
-var color='#f3f0e6',size=6,erasing=false,drawing=false,last=null,saveTimer=0;
+var color='#f3f0e6',size=6,erasing=false,drawing=false,last=null,saveTimer=0,boardReady=false,boardImageToken=0;
+var boardStatus=$('#boardStatus');
 function pos(e){var r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*cv.width/r.width,y:(e.clientY-r.top)*cv.height/r.height}}
+function setBoardStatus(text){boardStatus.textContent=text}
 function seg(a,b){
   cx.lineCap='round';cx.lineJoin='round';
   if(erasing){
@@ -385,15 +393,44 @@ function seg(a,b){
   }
   cx.globalCompositeOperation='source-over';cx.globalAlpha=1;
 }
-function queueSave(){clearTimeout(saveTimer);saveTimer=setTimeout(function(){try{store.set('monke-board',cv.toDataURL('image/png'))}catch(e){}},700)}
+function queueSave(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(function(){
+    saveTimer=0;
+    var image;
+    try{image=cv.toDataURL('image/png');store.set('monke-board',image)}
+    catch(e){setBoardStatus('This drawing could not be saved.');return}
+    if(!db||!boardReady)return;
+    if(image.length>900000){setBoardStatus('This drawing is saved on this device but is too large to sync.');return}
+    setBoardStatus('Syncing the board…');
+    db.from('chalkboard').upsert({id:'owner',image:image,updated_at:new Date().toISOString()}).then(function(result){
+      if(result.error)throw result.error;
+      setBoardStatus('Board synced.');
+    }).catch(function(){
+      setBoardStatus('Board sync failed; this drawing is saved on this device.');
+    });
+  },700);
+}
+function showBoardImage(image){
+  var token=++boardImageToken;
+  if(!image){cx.clearRect(0,0,cv.width,cv.height);$('#boardHint').classList.remove('gone');return}
+  var remote=new Image();
+  remote.onload=function(){
+    if(token!==boardImageToken)return;
+    cx.clearRect(0,0,cv.width,cv.height);cx.drawImage(remote,0,0,cv.width,cv.height);
+    $('#boardHint').classList.add('gone');
+  };
+  remote.onerror=function(){if(token===boardImageToken)setBoardStatus('The shared board image could not be loaded.')};
+  remote.src=image;
+}
 cv.addEventListener('pointerdown',function(e){
-  e.preventDefault();drawing=true;try{cv.setPointerCapture(e.pointerId)}catch(x){}
+  e.preventDefault();boardImageToken++;drawing=true;try{cv.setPointerCapture(e.pointerId)}catch(x){}
   last=pos(e);seg(last,last);$('#boardHint').classList.add('gone');
 });
 cv.addEventListener('pointermove',function(e){if(!drawing)return;var p=pos(e);seg(last,p);last=p});
 ['pointerup','pointercancel'].forEach(function(n){cv.addEventListener(n,function(){if(drawing){drawing=false;queueSave()}})});
 var saved=store.get('monke-board');
-if(saved){var si=new Image();si.onload=function(){cx.drawImage(si,0,0);$('#boardHint').classList.add('gone')};si.src=saved}
+if(saved)showBoardImage(saved);
 $$('#sticks .stick').forEach(function(b){b.addEventListener('click',function(){
   color=b.dataset.c;erasing=false;$('#eraser').setAttribute('aria-pressed','false');
   $$('#sticks .stick').forEach(function(o){o.setAttribute('aria-pressed',String(o===b))});
@@ -405,7 +442,7 @@ $('#eraser').addEventListener('click',function(){erasing=!erasing;this.setAttrib
 var clearBtn=$('#clear'),clearTimer=0;
 clearBtn.addEventListener('click',function(){
   if(clearBtn.dataset.sure){
-    cx.clearRect(0,0,cv.width,cv.height);store.set('monke-board','');$('#boardHint').classList.remove('gone');
+    cx.clearRect(0,0,cv.width,cv.height);store.set('monke-board','');$('#boardHint').classList.remove('gone');queueSave();
     clearBtn.textContent='Wipe board';delete clearBtn.dataset.sure;clearTimeout(clearTimer);
   }else{
     clearBtn.dataset.sure='1';clearBtn.textContent='Really wipe?';
@@ -417,7 +454,9 @@ clearBtn.addEventListener('click',function(){
 var letters=[],opened={},ready=false,lettersErr=null,mailState='';
 var INKS=['#1d3a8a','#1c1c1c','#a31f1f'];
 var pane=$('#mailPane');
-function newId(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6)}
+function mapLetter(row){
+  return {id:row.id,text:row.body,from:row.sender_name,ink:row.ink,ts:new Date(row.created_at).getTime(),opened_at:row.opened_at||null};
+}
 function hash(s){var h=0;for(var i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0;return Math.abs(h)}
 function makeEnv(o){
   var e=el('div','env '+(o.tone||'kraft'));
@@ -463,18 +502,17 @@ async function openLetter(l){
   });
   bar.appendChild(close);bar.appendChild(toss);stage.appendChild(bar);
 }
-var openedWrite=Promise.resolve();
 function markOpened(id){
   if(opened[id])return;
   opened[id]=1;
-  if(!db){renderMail();return}
-  openedWrite=openedWrite.then(function(){return db.doc('mailstate/owner').set({opened:opened})}).catch(function(){});
+  if(db)db.from('letters').update({opened_at:new Date().toISOString()}).eq('id',id).then(function(result){
+    if(result.error){mailState='Could not mark that letter as read.';renderMail()}
+  }).catch(function(){mailState='Could not mark that letter as read.';renderMail()});
   renderMail();
 }
 async function removeLetter(l){
-  var ref=db.doc('letters/'+l.uid),snap=await ref.get();
-  var cur=(snap.exists&&snap.data().letters)||[];
-  await ref.set({letters:cur.filter(function(x){return x.id!==l.id})});
+  var result=await db.from('letters').delete().eq('id',l.id);
+  if(result.error)throw result.error;
 }
 function renderPile(){
   var box=el('div');
@@ -484,7 +522,7 @@ function renderPile(){
   else if(!letters.length){
     box.appendChild(el('div','empty','Nothing in the pile yet. Letters people write on the visitor side land here, sealed.'));
   }else{
-    var unread=letters.filter(function(l){return !opened[l.id]}).length;
+    var unread=letters.filter(function(l){return !opened[l.id]&&!l.opened_at}).length;
     var st=el('div','stat');
     st.appendChild(el('p','',letters.length+(letters.length===1?' letter':' letters')+', '+unread+' unread'));
     box.appendChild(st);
@@ -495,7 +533,7 @@ function renderPile(){
       b.setAttribute('aria-label','Open letter from '+(l.from||'someone'));
       var tone=h%3===0?'parch':'kraft';l.tone=tone;
       var env=makeEnv({tone:tone,rot:((h%90)-45)/10,from:l.from});
-      if(opened[l.id])env.classList.add('read');
+      if(opened[l.id]||l.opened_at)env.classList.add('read');
       b.style.zIndex=String(1+(h%7));
       b.appendChild(env);
       b.addEventListener('click',function(){openLetter(l)});
@@ -557,24 +595,28 @@ function buildPad(){
     var text=ta.value.trim();
     status.className='status';fb.hidden=true;
     if(text.length<3){status.className='status bad';status.textContent='Write a few words first.';ta.focus();return}
-    var l={id:newId(),text:text,from:(nm.value.trim()||'someone'),ink:ink,ts:Date.now()};
+    var l={text:text,from:(nm.value.trim()||'someone'),ink:ink,ts:Date.now()};
     send.disabled=true;status.textContent='Sealing the envelope…';
     try{
-      if(!db||!uid)throw{code:'unavailable'};
-      var ref=db.doc('letters/'+uid),snap=await ref.get();
-      var cur=(snap.exists&&snap.data().letters)||[];
-      if(cur.length>=30)throw{code:'too_many'};
-      await ref.set({letters:cur.concat([l])});
+      if(!db||!currentUser||!currentUser.is_anonymous)throw{code:'unavailable'};
+      var result=await db.from('letters').insert({
+        sender_id:currentUser.id,
+        sender_name:l.from,
+        body:l.text,
+        ink:l.ink
+      }).select().single();
+      if(result.error)throw result.error;
+      l=mapLetter(result.data);
     }catch(err){
       send.disabled=false;status.className='status bad';
-      status.textContent=err&&err.code==='too_many'?'You have already sent a lot of letters. Give monke time to read them.':'The letter did not go through.';
+      status.textContent=err&&err.message==='too_many'?'You have already sent a lot of letters. Give monke time to read them.':'The letter did not go through. Please try again in a moment.';
       showFallback();return;
     }
     status.textContent='';
     store.set('monke-letter','');
     await playSend(box,l);
   });
-  note.textContent=db?'Pick a pen, write your letter, and seal it. It lands in monke’s pile.':'Letters cannot be delivered from this view, but you can still write one and copy it.';
+  note.textContent=db?'Pick a pen, write your letter, and seal it. It lands in monke’s pile.':'Letters cannot be delivered right now, but you can still write one and copy it.';
   return box;
 }
 async function playSend(box,l){
@@ -593,37 +635,130 @@ async function playSend(box,l){
   wrap.appendChild(again);
 }
 
+var lettersChannel=null;
+function buildOwnerLogin(){
+  var details=el('details','owner-login'),summary=el('summary','','Monke? Sign in to read the mail.');
+  var form=el('form','pad');form.style.marginTop='12px';
+  var email=el('input');email.type='email';email.autocomplete='username';email.required=true;email.placeholder='Email';email.setAttribute('aria-label','Owner email');
+  var password=el('input');password.type='password';password.autocomplete='current-password';password.required=true;password.placeholder='Password';password.setAttribute('aria-label','Owner password');
+  var submit=el('button','btn','Sign in');submit.type='submit';
+  var status=el('p','status','');form.appendChild(email);form.appendChild(password);form.appendChild(submit);form.appendChild(status);
+  form.addEventListener('submit',async function(e){
+    e.preventDefault();submit.disabled=true;status.textContent='Signing in…';
+    try{
+      var result=await db.auth.signInWithPassword({email:email.value,password:password.value});
+      if(result.error){status.className='status bad';status.textContent='Could not sign in. Check the email and password.';return}
+      status.textContent='';
+    }catch(err){status.className='status bad';status.textContent='Could not connect to Supabase. Please try again.'}
+    finally{submit.disabled=false}
+  });
+  details.appendChild(summary);details.appendChild(form);return details;
+}
 function renderMail(){
-  var key=isOwner?'owner':'visitor';
-  if(key==='visitor'){
-    if(!padView)padView=buildPad();
-    if(pane.firstChild!==padView){pane.replaceChildren(padView)}
+  if(isOwner){
+    var ownerBox=el('div');ownerBox.appendChild(renderPile());
+    if(mailState)ownerBox.appendChild(el('p','status bad',mailState));
+    var signOut=el('button','btn','Sign out');signOut.type='button';
+    signOut.addEventListener('click',async function(){
+      signOut.disabled=true;
+      try{
+        var result=await db.auth.signOut();
+        if(result.error)throw result.error;
+        var guest=await db.auth.signInAnonymously();
+        if(guest.error){mailState='You are signed out, but visitor letter sending is unavailable.';renderMail()}
+      }catch(err){mailState='Could not sign out. Please try again.';renderMail()}
+    });
+    ownerBox.appendChild(signOut);pane.replaceChildren(ownerBox);return;
+  }
+  if(!padView)padView=buildPad();
+  var visitorBox=el('div');visitorBox.appendChild(padView);
+  if(db)visitorBox.appendChild(buildOwnerLogin());
+  if(mailState)visitorBox.appendChild(el('p','status bad',mailState));
+  pane.replaceChildren(visitorBox);
+}
+function mapBoard(row){
+  var image=row&&row.image||'';
+  showBoardImage(image);store.set('monke-board',image);
+  setBoardStatus('Board synced.');
+}
+function saveLocalBoard(){
+  var image=store.get('monke-board')||'';
+  if(image&&image.length<=900000){
+    setBoardStatus('Syncing the board…');
+    db.from('chalkboard').upsert({id:'owner',image:image,updated_at:new Date().toISOString()}).then(function(result){
+      if(result.error)throw result.error;
+      setBoardStatus('Board synced.');
+    }).catch(function(){setBoardStatus('Board sync failed; this drawing is saved on this device.')});
   }else{
-    pane.replaceChildren(renderPile());
+    if(!image)showBoardImage('');
+    setBoardStatus(image?'This drawing is saved on this device but is too large to sync.':'Board synced.');
   }
 }
-
+async function refreshLetters(){
+  var result=await db.from('letters').select('*').order('created_at',{ascending:false});
+  if(result.error){ready=true;lettersErr='The mailbox could not be reached right now.';renderMail();return}
+  letters=result.data.map(mapLetter);ready=true;lettersErr=null;renderMail();
+}
+async function updateUser(user){
+  currentUser=user||null;uid=user&&user.id||null;isOwner=false;
+  if(lettersChannel){await db.removeChannel(lettersChannel);lettersChannel=null}
+  if(!user){renderMail();return}
+  var result=await db.from('mail_owners').select('user_id').eq('user_id',user.id).maybeSingle();
+  if(uid!==user.id)return;
+  if(result.error){mailState='Owner access could not be checked. Please verify the Supabase setup.';renderMail();return}
+  if(!result.data&&!user.is_anonymous){
+    mailState='That account is not configured as the mail owner.';
+    try{
+      var signedOut=await db.auth.signOut();
+      if(signedOut.error)throw signedOut.error;
+      var guest=await db.auth.signInAnonymously();
+      if(guest.error)mailState='That account is not configured as the mail owner, and visitor letter sending is unavailable.';
+    }catch(err){mailState='That account is not configured as the mail owner, and visitor letter sending is unavailable.'}
+    renderMail();return;
+  }
+  isOwner=!!result.data;mailState='';
+  if(isOwner){
+    ready=false;
+    lettersChannel=db.channel('owner-mail').on('postgres_changes',{event:'*',schema:'public',table:'letters'},function(){refreshLetters()}).subscribe(function(status){
+      if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'){lettersErr='Live mailbox updates are unavailable.';renderMail()}
+    });
+    await refreshLetters();
+  }
+  renderMail();
+}
 async function init(){
-  var c=window.claude;
-  var to=function(p,ms){return Promise.race([p,new Promise(function(r){setTimeout(function(){r(null)},ms)})]).catch(function(){return null})};
-  if(c&&c.use){
-    var res=await Promise.all([to(c.use('user'),5000),to(c.use('db'),5000),to(c.use('downloads'),5000)]);
-    var user=res[0];db=res[1];downloads=res[2];
-    if(user){try{isOwner=await user.isOwner();uid=await user.id()}catch(e){}}
+  if(!window.supabase||!window.supabase.createClient){
+    setBoardStatus('Supabase could not load; shared sync is unavailable.');
+    ready=true;lettersErr='The mailbox could not be reached right now.';renderMail();return;
+  }
+  db=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+  if(window.claude&&window.claude.use){
+    try{downloads=await window.claude.use('downloads')}catch(err){console.error('Could not load downloads support.',err)}
   }
   if(downloads)$('#savePic').hidden=false;
-  if(isOwner&&db){
-    db.collection('letters').onSnapshot(function(snap){
-      var all=[];
-      snap.docs.forEach(function(d){var x=d.data()||{};(x.letters||[]).forEach(function(l){all.push(Object.assign({},l,{uid:d.id}))})});
-      all.sort(function(a,b){return (b.ts||0)-(a.ts||0)});
-      letters=all;ready=true;lettersErr=null;renderMail();
-    },function(err){ready=true;lettersErr=err&&err.code||'unavailable';renderMail()});
-    db.doc('mailstate/owner').onSnapshot(function(s){
-      var d=s.exists?s.data():null;opened=Object.assign({},(d&&d.opened)||{},opened);renderMail();
-    },function(){});
-  }else if(isOwner){ready=true;lettersErr='unavailable'}
-  renderMail();
+  db.auth.onAuthStateChange(function(event,session){
+    setTimeout(function(){updateUser(session&&session.user||null)},0);
+  });
+  var sessionResult=await db.auth.getSession();
+  if(sessionResult.error){setBoardStatus('Could not connect to Supabase.');ready=true;lettersErr='The mailbox could not be reached right now.';renderMail();return}
+  currentUser=sessionResult.data.session&&sessionResult.data.session.user||null;
+  if(!currentUser){
+    var guest=await db.auth.signInAnonymously();
+    if(guest.error){setBoardStatus('Board sync is unavailable until Supabase anonymous sign-in is enabled.');mailState='Letters are unavailable until Supabase anonymous sign-in is enabled.'}
+    else currentUser=guest.data.user;
+  }
+  db.channel('chalkboard-live').on('postgres_changes',{event:'*',schema:'public',table:'chalkboard'},function(payload){
+    boardReady=true;
+    if(drawing||saveTimer)return;
+    mapBoard(payload.new);
+  }).subscribe(function(status){
+    if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'){boardReady=false;setBoardStatus('Board sync failed; this drawing is saved on this device.')}
+  });
+  var boardResult=await db.from('chalkboard').select('image').eq('id','owner').maybeSingle();
+  if(boardResult.error){boardReady=false;setBoardStatus('Board sync failed; check the Supabase setup.')}
+  else{boardReady=true;if(boardResult.data)mapBoard(boardResult.data);else saveLocalBoard()}
+  if(currentUser)await updateUser(currentUser);
+  else renderMail();
 }
 $('#savePic').addEventListener('click',function(){
   var bg=new Image();
